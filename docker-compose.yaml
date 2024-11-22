@@ -1,0 +1,10 @@
+services:
+  wsn:
+    image: ghcr.io/masteraler/wsn:latest
+    container_name: wsn
+    environment:
+      - WS_SERVER="0.0.0.0:666"
+      - WS_SECRET=
+    ports:
+      - "666:666"
+    restart: always
