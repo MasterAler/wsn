@@ -1,8 +1,0 @@
-[Match]
-Name=tap42
-
-[Link]
-MTUBytes=1400
-
-[Network]
-Address=192.168.42.1/24

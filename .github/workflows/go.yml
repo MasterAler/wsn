@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    name: Build Standalone Binary
+    name: Build Standalone Binaries
     runs-on: ubuntu-latest
     steps:
     - name: Repo checkout
@@ -21,19 +21,30 @@ jobs:
       with:
         go-version: '1.22.2'
 
-    - name: Build
+    - name: Build server
       run: cd server && go build -v
 
-    - name: Upload
+    - name: Upload server binary
       uses: actions/upload-artifact@v4.4.3
       with:
-        name: wsn-server
+        name: ws-server
         path: server/server
-        retention-days: 3
+        retention-days: 12
+        overwrite: true
+
+    - name: Build client wrapper
+      run: cd client-v2-wrapper && go build -v
+
+    - name: Upload client wrapper
+      uses: actions/upload-artifact@v4.4.3
+      with:
+        name: ws-client-v2-wrapper
+        path: client-v2-wrapper/client-v2-wrapper
+        retention-days: 12
         overwrite: true
 
   push_to_registry:
-    name: Build Docker image
+    name: Build Server Docker Image
     runs-on: ubuntu-latest
     permissions:
       packages: write
