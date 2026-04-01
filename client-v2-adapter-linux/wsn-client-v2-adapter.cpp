@@ -304,13 +304,11 @@ try {
 		throw std::runtime_error{"::listen failed"};
 	}
 
-	static std::atomic<int> client{0}; // static to be accessible in signal handlers
+	std::atomic<int> client{0};
 
 	signal(SIGPIPE, SIG_IGN);
-	std::signal(SIGINT,  +[](int){ client.store(-1); });
-	std::signal(SIGTERM, +[](int){ client.store(-1); });
 
-	std::thread tx_thread{[&tapHandle]{
+	std::thread tx_thread{[&tapHandle, &client]{
 		std::vector<char> buffer;
 		while (client.load() != -1) {
 			buffer.resize(8192);
@@ -332,7 +330,7 @@ try {
 		}
 	}};
 
-	std::thread rx_thread{[&tapHandle]{
+	std::thread rx_thread{[&tapHandle, &client]{
 		std::vector<char> buffer;
 		while (client.load() != -1) {
 			const int socket = client.load();
