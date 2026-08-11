@@ -45,6 +45,9 @@ jobs:
 
   push_to_registry:
     name: Build Server Docker Image
+    # Pull requests (especially those from forks) only receive a read-only
+    # GITHUB_TOKEN. Do not try to authenticate to or publish to GHCR for them.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -58,12 +61,12 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
         id: push
