@@ -330,3 +330,13 @@ Client logs should show an authenticated session after installation.
 WSN configures split DNS for the domains named at `init` and nothing further: it does not manage host entries, corporate certificate authorities, CIFS mounts, workplace user accounts, or SSH keys. In particular, do not restore SMB1 mount commands or inline share passwords as part of this deployment.
 
 Name resolution is best effort. If a client cannot program its resolver the tunnel still comes up and logs a warning; corporate hosts remain reachable by address.
+
+## History and attribution
+
+WSN v2 is a full rewrite. It keeps the original idea — a private Ethernet segment carried over an authenticated WebSocket, relayed by virtual MAC — but no source file from it survives.
+
+The original WSN (2024, `assenovich`) was a 237-line Go relay with Qt/C++ clients and hand-maintained `systemd-networkd` units. It authenticated every peer with one shared secret against `sha256(challenge‖secret‖challenge)`, drew that challenge from `math/rand`, and let each client declare whatever MAC it liked.
+
+v2 replaces all of it. Each peer has its own 32-byte key and proves possession with HMAC-SHA256 over a `crypto/rand` challenge bound to both its identity and its virtual MAC, so a key can be revoked on its own and a peer cannot spoof another's source address. The relay gives each peer its own bounded queue, read limit, and idle and write deadlines, and disconnects one that falls behind; the original set no deadline or limit anywhere and wrote to every peer synchronously from a single router goroutine, so one stalled client held up the whole segment. Everything around it is new: `wsnctl` provisioning with a deployment-specific CA, reproducible client bundles, signed-driver Windows and systemd Linux installers, a workplace gateway confined to named corporate CIDRs, split DNS, and a containerized relay behind Caddy.
+
+Both the earlier work and this one are covered by the MIT license reproduced in `LICENSE`.
