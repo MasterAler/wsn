@@ -1,85 +1,91 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Server build
+name: Build and test WSN v2
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Build Standalone Binaries
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-22.04
     steps:
-    - name: Repo checkout
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.22.2'
-
-    - name: Build server
-      run: cd server && go build -v
-
-    - name: Upload server binary
-      uses: actions/upload-artifact@v4.4.3
-      with:
-        name: ws-server
-        path: server/server
-        retention-days: 12
-        overwrite: true
-
-    - name: Build client wrapper
-      run: cd client-v2-wrapper && go build -v
-
-    - name: Upload client wrapper
-      uses: actions/upload-artifact@v4.4.3
-      with:
-        name: ws-client-v2-wrapper
-        path: client-v2-wrapper/client-v2-wrapper
-        retention-days: 12
-        overwrite: true
-
-  push_to_registry:
-    name: Build Server Docker Image
-    # Pull requests (especially those from forks) only receive a read-only
-    # GITHUB_TOKEN. Do not try to authenticate to or publish to GHCR for them.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-      attestations: write
-      id-token: write
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: masteraler/wsn
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          registry: ${{ env.REGISTRY }}
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l cmd internal)"
+      - name: Cross-compile Windows client
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/wsn-client
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/wsnctl
+      - name: Validate shell scripts
+        run: |
+          for script in internal/provision/assets/*.sh deploy/server/install.sh; do
+            sh -n "$script"
+          done
+
+  artifacts:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build versioned binaries
+        run: |
+          mkdir dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/wsn-client-linux-amd64 ./cmd/wsn-client
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/wsnctl-linux-amd64 ./cmd/wsnctl
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/wsn-client-windows-amd64.exe ./cmd/wsn-client
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/wsnctl-windows-amd64.exe ./cmd/wsnctl
+          sha256sum dist/* > dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+
+  image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        id: push
+      - id: push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}:latest
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v1
+          tags: ghcr.io/masteraler/wsn:${{ github.ref_name }}
+      - uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
+          subject-name: ghcr.io/masteraler/wsn
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true

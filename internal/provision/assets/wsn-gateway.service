@@ -1,0 +1,14 @@
+[Unit]
+Description=WSN workplace forwarding and NAT
+After=wsn-net.service
+Requires=wsn-net.service
+Before=wsn-client.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/wsn-gateway up
+ExecStop=/usr/local/libexec/wsn-gateway down
+
+[Install]
+WantedBy=multi-user.target

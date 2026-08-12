@@ -1,0 +1,15 @@
+{
+	auto_https off
+	admin off
+}
+
+https://{$WSN_PUBLIC_IP} {
+	tls /etc/wsn/relay.crt /etc/wsn/relay.key {
+		protocols tls1.3
+	}
+
+	@wsn path /wsn
+	reverse_proxy @wsn relay:8080
+
+	respond 404
+}

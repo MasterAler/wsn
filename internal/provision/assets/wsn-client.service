@@ -1,0 +1,25 @@
+[Unit]
+Description=WSN v2 client
+After=network-online.target wsn-net.service
+Wants=network-online.target
+Requires=wsn-net.service
+
+[Service]
+Type=simple
+User=wsn
+Group=wsn
+ExecStart=/opt/wsn/wsn-client -config /etc/wsn/client.json
+Restart=always
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadOnlyPaths=/etc/wsn
+
+[Install]
+WantedBy=multi-user.target

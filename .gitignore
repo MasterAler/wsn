@@ -1,5 +1,6 @@
-client/build
-server/server
-server/ws-server
-client-v2-wrapper/client-v2-wrapper
-client-v2-wrapper/ws-client-v2-wrapper
+/dist/
+/wsn-state/
+/deploy/server/.env
+/deploy/server/state/
+*.tar.gz
+*.zip

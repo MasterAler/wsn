@@ -1,0 +1,57 @@
+name: wsn
+
+services:
+  relay:
+    image: ${WSN_RELAY_IMAGE:?set WSN_RELAY_IMAGE to an immutable version or digest}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./state/server.json:/etc/wsn/server.json:ro
+    networks: [backend]
+    mem_limit: 128m
+    healthcheck:
+      test: [CMD, /wsn-server, healthcheck]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.10.0-alpine}
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      WSN_PUBLIC_IP: ${WSN_PUBLIC_IP:?set WSN_PUBLIC_IP}
+    ports:
+      - "443:443/tcp"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /config:size=4m,mode=0700
+      - /data:size=8m,mode=0700
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./state/relay.crt:/etc/wsn/relay.crt:ro
+      - ./state/relay.key:/etc/wsn/relay.key:ro
+    networks: [backend]
+    mem_limit: 128m
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
