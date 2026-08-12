@@ -30,11 +30,40 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	reload := make(chan config.Relay)
+	go watchReload(ctx, *configPath, reload, logger)
 	logger.Info("relay starting", "listen", cfg.Listen, "path", cfg.Path, "configured_clients", len(cfg.Clients))
-	if err := relay.ListenAndServe(ctx, cfg, logger); err != nil {
+	if err := relay.ListenAndServe(ctx, cfg, reload, logger); err != nil {
 		fatal(err)
 	}
 	logger.Info("relay stopped")
+}
+
+// watchReload re-reads the relay configuration on SIGHUP so that clients added
+// or revoked on the administrator machine take effect without dropping the
+// sessions of everybody else. A configuration that fails to parse is reported
+// and the running one is kept.
+func watchReload(ctx context.Context, path string, reload chan<- config.Relay, logger *slog.Logger) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signals:
+			updated, err := config.LoadRelay(path)
+			if err != nil {
+				logger.Error("reload failed; keeping the running configuration", "error", err)
+				continue
+			}
+			select {
+			case reload <- updated:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 func healthcheck(args []string) {

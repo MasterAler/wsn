@@ -18,6 +18,8 @@ func main() {
 		initDeployment(os.Args[2:])
 	case "add-client":
 		addClient(os.Args[2:])
+	case "enroll":
+		enroll(os.Args[2:])
 	case "revoke-client":
 		revokeClient(os.Args[2:])
 	case "list-clients":
@@ -57,8 +59,13 @@ func initDeployment(args []string) {
 	publicIP := flags.String("public-ip", "", "static relay IPv4 address")
 	overlay := flags.String("overlay", "", "non-overlapping overlay IPv4 CIDR")
 	gateway := flags.String("gateway", "", "gateway address inside the overlay")
+	dns := flags.String("dns", "", "corporate DNS server reachable through the gateway")
+	search := flags.String("search", "", "comma-separated DNS domains resolved by that server")
 	_ = flags.Parse(args)
-	must(provision.Init(provision.InitOptions{Directory: *directory, PublicIP: *publicIP, Overlay: *overlay, Gateway: *gateway}))
+	must(provision.Init(provision.InitOptions{
+		Directory: *directory, PublicIP: *publicIP, Overlay: *overlay, Gateway: *gateway,
+		DNS: *dns, Search: splitList(*search),
+	}))
 	fingerprint, err := provision.Fingerprint(*directory + "/relay-ca.crt")
 	must(err)
 	fmt.Printf("initialized %s\nrelay CA public-key fingerprint: %s\n", *directory, fingerprint)
@@ -81,6 +88,37 @@ func addClient(args []string) {
 	})
 	must(err)
 	fmt.Printf("added %s (%s, %s, %s)\n", client.ID, client.OS, client.Address, client.MAC)
+}
+
+func enroll(args []string) {
+	flags := flag.NewFlagSet("enroll", flag.ExitOnError)
+	directory := flags.String("state", "./wsn-state", "private deployment state directory")
+	id := flags.String("id", "", "unique client identity")
+	osName := flags.String("os", "linux", "linux or windows")
+	role := flags.String("role", "client", "client or gateway")
+	address := flags.String("address", "", "overlay IPv4 address without prefix")
+	device := flags.String("device", "", "TAP device name")
+	routes := flags.String("routes", "", "comma-separated corporate destination CIDRs")
+	egress := flags.String("egress", "", "gateway corporate egress interface")
+	binary := flags.String("client-binary", "", "matching wsn-client release binary")
+	tapInstaller := flags.String("tap-installer", "", "official signed TAP-Windows installer")
+	tapctl := flags.String("tapctl", "", "official tapctl.exe")
+	output := flags.String("output", "", "output .zip or .tar.gz")
+	serverOutput := flags.String("server-output", "wsn-server-private.tar.gz", "refreshed server bundle")
+	_ = flags.Parse(args)
+	result, err := provision.Enroll(provision.EnrollOptions{
+		AddOptions: provision.AddOptions{
+			Directory: *directory, ID: *id, OS: *osName, Role: *role, Address: *address,
+			Device: *device, Routes: splitList(*routes), Egress: *egress,
+		},
+		ClientBinary: *binary, TapInstaller: *tapInstaller, Tapctl: *tapctl,
+		Output: *output, ServerOutput: *serverOutput,
+	})
+	must(err)
+	fmt.Printf("added %s (%s, %s, %s)\n", result.Client.ID, result.Client.OS, result.Client.Address, result.Client.MAC)
+	fmt.Println("client bundle:", result.ClientBundle)
+	fmt.Println("server bundle:", result.ServerBundle)
+	fmt.Println("next: copy the server bundle to the VDS and run deploy/server/reload.sh on it")
 }
 
 func revokeClient(args []string) {
@@ -132,7 +170,7 @@ func splitList(value string) []string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: wsnctl <init|add-client|revoke-client|list-clients|bundle|server-bundle|rotate-certificate> [options]")
+	fmt.Fprintln(os.Stderr, "usage: wsnctl <init|enroll|add-client|revoke-client|list-clients|bundle|server-bundle|rotate-certificate> [options]")
 	os.Exit(2)
 }
 

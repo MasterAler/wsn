@@ -61,15 +61,30 @@ func New(cfg config.Client, logger *slog.Logger) (*Runner, error) {
 	}, nil
 }
 
+const (
+	minimumBackoff = time.Second
+	maximumBackoff = 30 * time.Second
+	// A session that stayed up this long counts as healthy, so the next
+	// disconnect starts over at the minimum delay. Without this the backoff
+	// only ever grows: a laptop that suspends or roams between networks a few
+	// times keeps the maximum delay for the rest of the day, and reconnecting
+	// after opening the lid appears to hang.
+	healthySession = time.Minute
+)
+
 func (r *Runner) Run(ctx context.Context) error {
-	backoff := time.Second
+	backoff := minimumBackoff
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
+		started := time.Now()
 		err := r.runSession(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if time.Since(started) >= healthySession {
+			backoff = minimumBackoff
 		}
 		r.log.Warn("session ended; reconnecting", "error", err, "delay", backoff)
 		jitter := time.Duration(rand.Int63n(int64(backoff/2 + 1)))
@@ -80,11 +95,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 		}
-		if backoff < 30*time.Second {
+		if backoff < maximumBackoff {
 			backoff *= 2
 		}
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
+		if backoff > maximumBackoff {
+			backoff = maximumBackoff
 		}
 	}
 }

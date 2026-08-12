@@ -88,6 +88,57 @@ func TestSourceMACSpoofDisconnectsClient(t *testing.T) {
 	}
 }
 
+func TestReloadDisconnectsRevokedClientAndAdmitsNewOne(t *testing.T) {
+	keyA := bytes.Repeat([]byte{4}, 32)
+	keyB := bytes.Repeat([]byte{5}, 32)
+	macA, _ := net.ParseMAC("02:00:00:00:00:04")
+	macB, _ := net.ParseMAC("02:00:00:00:00:05")
+	cfg := config.Relay{
+		Path: "/wsn", HealthPath: "/healthz", MaxFrameSize: 2048, ClientQueueSize: 4,
+		HandshakeTimeoutMS: 1000, IdleTimeoutMS: 5000,
+		Clients: []config.RelayClient{{ID: "alice", Key: config.EncodeKey(keyA), MAC: macA.String()}},
+	}
+	server, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/wsn"
+
+	alice := dialAuthenticated(t, url, "alice", keyA, macA)
+	defer alice.Close()
+
+	// Bob is not configured yet, so the relay must refuse him.
+	dialer := websocket.Dialer{Subprotocols: []string{protocol.Subprotocol}}
+	rejected, _, err := dialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello, _ := protocol.MarshalHello("bob")
+	if err := rejected.WriteMessage(websocket.BinaryMessage, hello); err != nil {
+		t.Fatal(err)
+	}
+	_ = rejected.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := rejected.ReadMessage(); err == nil {
+		t.Fatal("unconfigured client was not rejected")
+	}
+	rejected.Close()
+
+	// Revoke Alice and authorize Bob in the same reload.
+	cfg.Clients = []config.RelayClient{{ID: "bob", Key: config.EncodeKey(keyB), MAC: macB.String()}}
+	if err := server.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = alice.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := alice.ReadMessage(); err == nil {
+		t.Fatal("revoked client kept its established session")
+	}
+	bob := dialAuthenticated(t, url, "bob", keyB, macB)
+	bob.Close()
+}
+
 func TestOversizedHelloIsRejected(t *testing.T) {
 	cfg := config.Relay{
 		Path: "/wsn", HealthPath: "/healthz", MaxFrameSize: 2048, ClientQueueSize: 4,

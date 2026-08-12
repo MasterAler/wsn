@@ -65,4 +65,9 @@ if [ -f /etc/wsn/gateway.env ]; then
 fi
 systemctl enable --now wsn-client.service
 
+if [ -f "$bundle_dir/ca-fingerprint.txt" ]; then
+  printf 'Relay CA public-key fingerprint: %s\n' "$(cat "$bundle_dir/ca-fingerprint.txt")"
+  printf 'Confirm it matches the value your administrator published.\n'
+fi
+
 echo "WSN installation complete"

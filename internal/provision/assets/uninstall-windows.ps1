@@ -13,6 +13,10 @@ if (Get-Service -Name 'WSNClient' -ErrorAction SilentlyContinue) {
     & sc.exe delete WSNClient | Out-Null
 }
 
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.Comment -eq 'WSN' } |
+    ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }
+
 if ($Meta) {
     Get-NetRoute -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
     $Adapter = Get-NetAdapter -Name $Meta.device -ErrorAction SilentlyContinue

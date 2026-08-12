@@ -26,6 +26,7 @@ type authorizedClient struct {
 type Server struct {
 	cfg       config.Relay
 	log       *slog.Logger
+	mu        sync.RWMutex
 	clients   map[string]authorizedClient
 	hub       *hub
 	upgrader  websocket.Upgrader
@@ -34,11 +35,7 @@ type Server struct {
 	authSlots chan struct{}
 }
 
-func New(cfg config.Relay, logger *slog.Logger) (*Server, error) {
-	maxPendingHandshakes := cfg.MaxPendingHandshakes
-	if maxPendingHandshakes == 0 {
-		maxPendingHandshakes = 32
-	}
+func authorizedClients(cfg config.Relay) (map[string]authorizedClient, error) {
 	clients := make(map[string]authorizedClient, len(cfg.Clients))
 	for _, item := range cfg.Clients {
 		key, err := config.DecodeKey(item.Key)
@@ -50,6 +47,18 @@ func New(cfg config.Relay, logger *slog.Logger) (*Server, error) {
 			return nil, err
 		}
 		clients[item.ID] = authorizedClient{id: item.ID, key: key, mac: mac}
+	}
+	return clients, nil
+}
+
+func New(cfg config.Relay, logger *slog.Logger) (*Server, error) {
+	maxPendingHandshakes := cfg.MaxPendingHandshakes
+	if maxPendingHandshakes == 0 {
+		maxPendingHandshakes = 32
+	}
+	clients, err := authorizedClients(cfg)
+	if err != nil {
+		return nil, err
 	}
 	return &Server{
 		cfg:       cfg,
@@ -68,6 +77,33 @@ func New(cfg config.Relay, logger *slog.Logger) (*Server, error) {
 			},
 		},
 	}, nil
+}
+
+// Reload swaps the set of authorized clients and disconnects any established
+// session whose identity has been revoked or whose virtual MAC has changed, so
+// a revocation takes effect immediately instead of at the next relay restart.
+// Transport settings (listen address, paths, timeouts, queue sizes) are fixed
+// at startup and are deliberately not re-applied; changing those still needs a
+// restart.
+func (s *Server) Reload(cfg config.Relay) error {
+	clients, err := authorizedClients(cfg)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.clients = clients
+	s.mu.Unlock()
+	disconnected := s.hub.retainAuthorized(clients)
+	s.log.Info("relay configuration reloaded",
+		"configured_clients", len(clients), "disconnected_clients", disconnected)
+	return nil
+}
+
+func (s *Server) authorized(id string) (authorizedClient, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	client, exists := s.clients[id]
+	return client, exists
 }
 
 func (s *Server) Handler() http.Handler {
@@ -135,6 +171,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		idle: s.idle,
 	}
 	s.hub.add(peer)
+	// A reload that ran between authentication and registration could not have
+	// seen this peer, so re-check now: otherwise a revoked client that happens
+	// to be mid-handshake keeps its session.
+	if current, stillAuthorized := s.authorized(peer.id); !stillAuthorized || !bytes.Equal(current.mac, peer.mac) {
+		s.hub.remove(peer)
+		peer.stop()
+		s.log.Warn("client revoked during handshake", "id", peer.id, "remote", remote)
+		return
+	}
 	s.log.Info("client connected", "id", peer.id, "mac", peer.mac.String(), "remote", remote)
 	go peer.writeLoop()
 	peer.readLoop(s.cfg.MaxFrameSize, s.hub)
@@ -156,7 +201,7 @@ func (s *Server) authenticate(conn *websocket.Conn) (authorizedClient, error) {
 	if err != nil {
 		return authorizedClient{}, err
 	}
-	client, exists := s.clients[id]
+	client, exists := s.authorized(id)
 	if !exists {
 		return authorizedClient{}, errors.New("unknown client")
 	}
@@ -217,6 +262,25 @@ func (h *hub) remove(p *peer) {
 		delete(h.byMAC, key)
 	}
 	h.mu.Unlock()
+}
+
+// retainAuthorized disconnects every peer that the supplied client set no
+// longer authorizes, and reports how many were dropped.
+func (h *hub) retainAuthorized(clients map[string]authorizedClient) int {
+	h.mu.RLock()
+	stale := make([]*peer, 0)
+	for id, p := range h.byID {
+		client, exists := clients[id]
+		if !exists || !bytes.Equal(client.mac, p.mac) {
+			stale = append(stale, p)
+		}
+	}
+	h.mu.RUnlock()
+	for _, p := range stale {
+		h.log.Info("disconnecting revoked client", "id", p.id, "mac", p.mac.String())
+		p.stop()
+	}
+	return len(stale)
 }
 
 func (h *hub) forward(sender *peer, frame []byte) {
@@ -318,7 +382,10 @@ func (p *peer) writeLoop() {
 	}
 }
 
-func ListenAndServe(ctx context.Context, cfg config.Relay, logger *slog.Logger) error {
+// ListenAndServe runs the relay until ctx is cancelled. Every configuration
+// received on reload is applied to the running server without interrupting
+// sessions that remain authorized; a nil channel disables reloading.
+func ListenAndServe(ctx context.Context, cfg config.Relay, reload <-chan config.Relay, logger *slog.Logger) error {
 	relay, err := New(cfg, logger)
 	if err != nil {
 		return err
@@ -332,15 +399,21 @@ func ListenAndServe(ctx context.Context, cfg config.Relay, logger *slog.Logger) 
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpServer.ListenAndServe() }()
-	select {
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	for {
+		select {
+		case err := <-errCh:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		case updated := <-reload:
+			if err := relay.Reload(updated); err != nil {
+				logger.Error("reload rejected; keeping the running configuration", "error", err)
+			}
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return httpServer.Shutdown(shutdownCtx)
 		}
-		return err
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
 	}
 }

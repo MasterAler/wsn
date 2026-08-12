@@ -18,6 +18,10 @@ The VDS is only an Ethernet relay and never joins the overlay. Each endpoint has
 
 The gateway does not install WSN-specific `INPUT` firewall rules. Services already bound on its overlay address therefore remain governed by the host's existing firewall.
 
+A deployment may also carry a corporate DNS server and the domains it answers for. Clients resolve only those domains through it and keep their existing resolvers for everything else, so home and public networks continue to work normally. The deployment is limited to a single gateway, which is the workplace side of one office.
+
+The transport is Ethernet inside TLS inside TCP. On a lossy link the inner and outer congestion control compete, so throughput can drop sharply where a UDP-based VPN would degrade gently. This is inherent to tunnelling over WebSockets and is not an MTU fault.
+
 ## Security model
 
 - TLS 1.3 uses a deployment-specific private CA. Clients load that CA only inside WSN; installers do not add it to an operating-system trust store.
@@ -31,7 +35,10 @@ Never reuse the historical v1 shared secret. If a credential has appeared in cha
 
 ## Build
 
-Go 1.22.2 or newer is required.
+Go 1.22.2 or newer is required to build the sources. Released binaries and the
+relay image are built with a currently supported Go toolchain so they carry the
+latest standard-library TLS fixes; `go.mod` only states the minimum language
+version the code needs.
 
 Linux clients require systemd, `iproute2`, and `/dev/net/tun`; gateway installations additionally require `iptables`. Windows installation requires elevated PowerShell and an official TAP-Windows driver. The VDS requires Docker Engine with the Compose plugin.
 
@@ -78,10 +85,16 @@ dist/wsnctl init \
   -state ./wsn-state \
   -public-ip 203.0.113.10 \
   -overlay 100.96.42.0/24 \
-  -gateway 100.96.42.1
+  -gateway 100.96.42.1 \
+  -dns 10.0.0.53 \
+  -search corp.example
 ```
 
 This creates a ten-year root CA, a two-year relay leaf certificate containing the public IP SAN, and an initially empty relay configuration. Back up `wsn-state` encrypted and offline.
+
+`-dns` and `-search` are optional and must be given together. They configure split DNS: the listed domains resolve through the corporate server, everything else keeps using each machine's existing resolvers. The DNS server must sit outside the overlay, and every client's routes must contain it — `add-client` rejects a client that could not reach it. Omit both flags to deploy without name resolution and reach corporate hosts by address.
+
+Record the CA fingerprint this command prints. Each installer displays the fingerprint of the CA in its bundle, so colleagues can confirm out of band that they received your deployment and not a substituted one.
 
 ### 3. Add the workplace gateway
 
@@ -99,7 +112,9 @@ dist/wsnctl add-client \
   -routes 10.0.0.0/16,10.5.0.0/16,172.19.102.0/24
 ```
 
-The gateway's corporate routes are used for forwarding validation and firewall/NAT rules. They are not installed via the overlay.
+The gateway's corporate routes are used for forwarding validation and firewall/NAT rules. They are not installed via the overlay. A deployment has exactly one gateway; adding a second is rejected.
+
+The gateway does not receive the deployment's DNS settings. It already sits on the corporate network and keeps its own resolver.
 
 ### 4. Add any number of clients
 
@@ -125,6 +140,22 @@ Addresses and MACs must be unique, but there is no two-user limit:
 dist/wsnctl list-clients -state ./wsn-state
 ```
 
+### 5. Or enrol a colleague in one step
+
+`enroll` takes the same flags as `add-client` plus the bundle flags, and performs `add-client`, `bundle`, and `server-bundle` together so the three artefacts cannot drift apart. If the bundle cannot be built the client is rolled back out of the state rather than left half-provisioned.
+
+```sh
+dist/wsnctl enroll \
+  -state ./wsn-state \
+  -id bob-ubuntu \
+  -os linux \
+  -address 100.96.42.3 \
+  -routes 10.0.0.0/16,172.19.102.0/24 \
+  -client-binary ./dist/wsn-client-linux-amd64
+```
+
+It writes the client bundle and a refreshed `wsn-server-private.tar.gz`; deploy the latter with `reload.sh` as described below.
+
 ## Deploy the VDS
 
 Install Docker Engine and the Compose plugin from Docker's official Ubuntu instructions. Configure the host/provider firewall to expose the chosen SSH port and `443/tcp` only.
@@ -149,7 +180,13 @@ sudo ./install.sh /root/wsn-server-private
 
 Compose publishes only Caddy on `443/tcp`. The relay has no host port and accepts trusted proxy metadata only from the private Compose network. Logs rotate at 10 MiB with three files, and each service is limited to 128 MiB.
 
-After adding or revoking a client, create and deploy a fresh server bundle, then run `install.sh` again. Connections briefly restart.
+After adding or revoking a client, copy the fresh server bundle to the VDS and run `reload.sh` instead of `install.sh`:
+
+```sh
+sudo ./reload.sh /root/wsn-server-private
+```
+
+This signals the relay to re-read its client list. Sessions that are still authorized keep running, and a revoked identity is disconnected immediately rather than surviving until the next restart. Use `install.sh` when the relay image or the TLS certificate changed; that path recreates the containers and briefly drops every session.
 
 Renew the leaf certificate before its two-year expiry without changing clients:
 
@@ -199,8 +236,10 @@ The installer:
 - creates a locked `wsn` system user;
 - validates existing kernel routes before changing networking;
 - creates the TAP and persistent routes through a oneshot unit;
+- programs split DNS through `resolvectl` when the deployment defines a resolver;
 - runs the client unprivileged with systemd hardening;
-- enables forwarding and dedicated `WSN_FORWARD`/`WSN_POSTROUTING` chains only for gateway bundles.
+- enables forwarding and dedicated `WSN_FORWARD`/`WSN_POSTROUTING` chains only for gateway bundles;
+- prints the relay CA fingerprint for out-of-band comparison.
 
 The gateway script does not modify `INPUT`. Its forwarding chain allows every port/protocol inside configured corporate CIDRs, rejects other WSN forwarding, and removes only its own rules on uninstall.
 
@@ -226,7 +265,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 Get-Service WSNClient
 ```
 
-The installer rejects overlapping routes, installs the signed driver, creates the fixed-MAC TAP adapter, adds persistent routes, protects configuration for SYSTEM and Administrators, and configures service recovery. `uninstall-windows.ps1` removes WSN while retaining the shared TAP driver.
+The installer rejects overlapping routes, installs the signed driver, creates the fixed-MAC TAP adapter, adds persistent routes, adds NRPT rules so only the deployment's domains resolve through the corporate server, protects configuration for SYSTEM and Administrators, configures service recovery, and prints the relay CA fingerprint. `uninstall-windows.ps1` removes WSN and its NRPT rules while retaining the shared TAP driver.
 
 ### Manual upgrades and rollback
 
@@ -251,6 +290,14 @@ Revoke a lost or retired client and redeploy the server bundle:
 ```sh
 dist/wsnctl revoke-client -state ./wsn-state -id alice-windows
 dist/wsnctl server-bundle -state ./wsn-state -output wsn-server-private.tar.gz
+# then, on the VDS, after extracting the bundle:
+sudo /opt/wsn/deploy/server/reload.sh /root/wsn-server-private
+```
+
+Confirm the revocation took effect:
+
+```sh
+docker compose logs --tail=20 relay | grep reloaded
 ```
 
 For Linux diagnostics:
@@ -270,11 +317,16 @@ For VDS diagnostics:
 cd /opt/wsn/deploy/server
 docker compose ps
 docker compose logs --tail=200 relay caddy
-curl --cacert /secure/path/relay-ca.crt https://PUBLIC_IP/
+curl -o /dev/null -w '%{http_code}\n' --cacert /secure/path/relay-ca.crt https://PUBLIC_IP/
+curl -o /dev/null -w '%{http_code}\n' --cacert /secure/path/relay-ca.crt https://PUBLIC_IP/wsn
 ```
 
-A `404` from `/` confirms Caddy is reachable without exposing a public health endpoint. Client logs should show an authenticated session after installation.
+The first request must return `404` and the second must return `400`. The `400` is the relay rejecting a plain HTTP request on its WebSocket path, and it is the check that matters: a `404` there means Caddy is answering the relay's path itself and no client can ever connect. Testing only `/` cannot distinguish a healthy deployment from that failure.
+
+Client logs should show an authenticated session after installation.
 
 ## Scope exclusions
 
-WSN does not manage corporate DNS or host entries, corporate certificate authorities, CIFS mounts, workplace user accounts, or SSH keys. In particular, do not restore SMB1 mount commands or inline share passwords as part of this deployment.
+WSN configures split DNS for the domains named at `init` and nothing further: it does not manage host entries, corporate certificate authorities, CIFS mounts, workplace user accounts, or SSH keys. In particular, do not restore SMB1 mount commands or inline share passwords as part of this deployment.
+
+Name resolution is best effort. If a client cannot program its resolver the tunnel still comes up and logs a warning; corporate hosts remain reachable by address.

@@ -3,6 +3,7 @@ package provision
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -37,6 +38,8 @@ type State struct {
 	PublicIP string              `json:"public_ip"`
 	Overlay  string              `json:"overlay"`
 	Gateway  string              `json:"gateway"`
+	DNS      string              `json:"dns,omitempty"`
+	Search   []string            `json:"search,omitempty"`
 	Clients  []ProvisionedClient `json:"clients"`
 }
 
@@ -57,6 +60,8 @@ type InitOptions struct {
 	PublicIP  string
 	Overlay   string
 	Gateway   string
+	DNS       string
+	Search    []string
 }
 
 type AddOptions struct {
@@ -95,10 +100,17 @@ func Init(options InitOptions) error {
 	if err != nil || !usableAddress(overlay, gateway) {
 		return errors.New("gateway must be a usable address inside overlay")
 	}
+	dns, search, err := normalizeResolver(options.DNS, options.Search, overlay)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(options.Directory, 0700); err != nil {
 		return err
 	}
-	state := State{Version: 1, PublicIP: publicIP.String(), Overlay: overlay.String(), Gateway: gateway.String()}
+	state := State{
+		Version: 1, PublicIP: publicIP.String(), Overlay: overlay.String(),
+		Gateway: gateway.String(), DNS: dns, Search: search,
+	}
 	if err := config.SaveJSON(filepath.Join(options.Directory, "state.json"), state, 0600); err != nil {
 		return err
 	}
@@ -160,6 +172,24 @@ func AddClient(options AddOptions) (ProvisionedClient, error) {
 	}
 	if options.Role == "gateway" && len(routes) == 0 {
 		return ProvisionedClient{}, errors.New("gateway requires at least one corporate destination route")
+	}
+	// A resolver that no route reaches would silently break name resolution
+	// for this client instead of failing at provisioning time. The gateway is
+	// exempt: it sits on the corporate network and keeps its own resolver.
+	if state.DNS != "" && options.Role != "gateway" {
+		resolver, _ := netip.ParseAddr(state.DNS)
+		reachable := false
+		for _, route := range routes {
+			prefix, _ := netip.ParsePrefix(route)
+			if prefix.Contains(resolver) {
+				reachable = true
+				break
+			}
+		}
+		if !reachable {
+			return ProvisionedClient{}, fmt.Errorf(
+				"corporate DNS server %s is not inside any route of this client; add the CIDR containing it to -routes", state.DNS)
+		}
 	}
 	if options.Device == "" {
 		if options.OS == "windows" {
@@ -251,6 +281,9 @@ func Bundle(options BundleOptions) (string, error) {
 	if selected.OS == "windows" && (options.TapInstaller == "" || options.Tapctl == "") {
 		return "", errors.New("Windows bundles require tap-installer and tapctl")
 	}
+	if err := verifyClientBinary(options.ClientBinary, selected.OS); err != nil {
+		return "", err
+	}
 	temp, err := os.MkdirTemp("", "wsn-bundle-*")
 	if err != nil {
 		return "", err
@@ -275,6 +308,47 @@ func Bundle(options BundleOptions) (string, error) {
 		return "", err
 	}
 	return options.Output, nil
+}
+
+type EnrollOptions struct {
+	AddOptions
+	ClientBinary string
+	TapInstaller string
+	Tapctl       string
+	Output       string
+	ServerOutput string
+}
+
+type EnrollResult struct {
+	Client       ProvisionedClient
+	ClientBundle string
+	ServerBundle string
+}
+
+// Enroll adds a client, builds its private bundle, and refreshes the server
+// bundle in one step, so the three artefacts can never drift apart. A client
+// whose bundle cannot be built is rolled back out of the deployment state
+// rather than left half-provisioned.
+func Enroll(options EnrollOptions) (EnrollResult, error) {
+	client, err := AddClient(options.AddOptions)
+	if err != nil {
+		return EnrollResult{}, err
+	}
+	clientBundle, err := Bundle(BundleOptions{
+		Directory: options.Directory, ID: client.ID, ClientBinary: options.ClientBinary,
+		TapInstaller: options.TapInstaller, Tapctl: options.Tapctl, Output: options.Output,
+	})
+	if err != nil {
+		if revokeErr := RevokeClient(options.Directory, client.ID); revokeErr != nil {
+			return EnrollResult{}, fmt.Errorf("%w (rolling back %s also failed: %v)", err, client.ID, revokeErr)
+		}
+		return EnrollResult{}, err
+	}
+	serverBundle, err := ServerBundle(options.Directory, options.ServerOutput)
+	if err != nil {
+		return EnrollResult{}, err
+	}
+	return EnrollResult{Client: client, ClientBundle: clientBundle, ServerBundle: serverBundle}, nil
 }
 
 func ServerBundle(directory, output string) (string, error) {
@@ -378,10 +452,24 @@ func renderBundle(directory string, state State, client ProvisionedClient, optio
 	if err != nil {
 		return err
 	}
+	caFingerprint, err := Fingerprint(filepath.Join(options.Directory, "relay-ca.crt"))
+	if err != nil {
+		return err
+	}
+	// The gateway already sits on the corporate network and resolves through
+	// its own resolver; pointing it at the corporate DNS server across the
+	// overlay would route replies back through itself.
+	resolver := state.DNS
+	searchDomains := state.Search
+	if client.Role == "gateway" {
+		resolver = ""
+		searchDomains = nil
+	}
 	meta := map[string]any{
 		"id": client.ID, "role": client.Role, "device": client.Device, "mac": client.MAC,
 		"address": client.Address, "gateway": state.Gateway, "overlay": state.Overlay,
 		"routes": client.Routes, "egress": client.Egress, "client_sha256": clientHash,
+		"dns": resolver, "search": searchDomains, "ca_sha256": caFingerprint,
 	}
 	if client.OS == "windows" {
 		tapHash, err := fileSHA256(options.TapInstaller)
@@ -402,9 +490,17 @@ func renderBundle(directory string, state State, client ProvisionedClient, optio
 	if client.Role == "gateway" {
 		networkRoutes = nil
 	}
-	networkEnvironment := fmt.Sprintf("WSN_DEVICE='%s'\nWSN_MAC='%s'\nWSN_ADDRESS='%s'\nWSN_GATEWAY='%s'\nWSN_ROUTES='%s'\n",
-		client.Device, client.MAC, client.Address, state.Gateway, strings.Join(networkRoutes, " "))
+	networkEnvironment := fmt.Sprintf(
+		"WSN_DEVICE='%s'\nWSN_MAC='%s'\nWSN_ADDRESS='%s'\nWSN_GATEWAY='%s'\nWSN_ROUTES='%s'\nWSN_DNS='%s'\nWSN_SEARCH='%s'\n",
+		client.Device, client.MAC, client.Address, state.Gateway,
+		strings.Join(networkRoutes, " "), resolver, strings.Join(searchDomains, " "))
 	if err := os.WriteFile(filepath.Join(directory, "network.env"), []byte(networkEnvironment), 0644); err != nil {
+		return err
+	}
+	// Shipped as plain text so the Linux installer can display it without a
+	// JSON parser; the recipient compares it with the value wsnctl init
+	// printed on the administrator machine.
+	if err := os.WriteFile(filepath.Join(directory, "ca-fingerprint.txt"), []byte(caFingerprint+"\n"), 0644); err != nil {
 		return err
 	}
 	if client.Role == "gateway" {
@@ -543,6 +639,99 @@ func usableAddress(prefix netip.Prefix, address netip.Addr) bool {
 	}
 	broadcast := networkValue | ^mask
 	return addressValue != broadcast
+}
+
+// normalizeResolver validates the optional corporate DNS server and its search
+// domains. Both are required together: a resolver without routing domains has
+// no well-defined split-DNS behaviour on either platform.
+func normalizeResolver(value string, domains []string, overlay netip.Prefix) (string, []string, error) {
+	resolver := strings.TrimSpace(value)
+	search, err := normalizeSearchDomains(domains)
+	if err != nil {
+		return "", nil, err
+	}
+	if resolver == "" {
+		if len(search) > 0 {
+			return "", nil, errors.New("search domains require a dns server")
+		}
+		return "", nil, nil
+	}
+	address, err := netip.ParseAddr(resolver)
+	if err != nil || !address.Is4() {
+		return "", nil, errors.New("dns must be an IPv4 address")
+	}
+	if overlay.Contains(address) {
+		return "", nil, errors.New("dns must be a corporate address outside the overlay")
+	}
+	if len(search) == 0 {
+		return "", nil, errors.New("dns requires at least one search domain")
+	}
+	return address.String(), search, nil
+}
+
+func normalizeSearchDomains(values []string) ([]string, error) {
+	unique := make(map[string]struct{})
+	for _, value := range values {
+		domain := strings.Trim(strings.TrimSpace(value), ".")
+		if domain == "" {
+			continue
+		}
+		if !safeDomainName(domain) {
+			return nil, fmt.Errorf("invalid DNS search domain %q", value)
+		}
+		unique[strings.ToLower(domain)] = struct{}{}
+	}
+	result := make([]string, 0, len(unique))
+	for domain := range unique {
+		result = append(result, domain)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func safeDomainName(value string) bool {
+	if len(value) < 1 || len(value) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// verifyClientBinary rejects a client binary built for the wrong operating
+// system. The installers only compare SHA-256 hashes, so a mismatched binary
+// installs cleanly and then fails when the service starts, with an error that
+// points nowhere near the actual mistake.
+func verifyClientBinary(path, operatingSystem string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	switch operatingSystem {
+	case "linux":
+		if !bytes.Equal(header, []byte{0x7f, 'E', 'L', 'F'}) {
+			return fmt.Errorf("%s is not a Linux ELF binary", path)
+		}
+	case "windows":
+		if header[0] != 'M' || header[1] != 'Z' {
+			return fmt.Errorf("%s is not a Windows PE binary", path)
+		}
+	}
+	return nil
 }
 
 func normalizeRoutes(values []string, overlay netip.Prefix) ([]string, error) {

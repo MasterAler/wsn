@@ -48,10 +48,15 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./state/relay.crt:/etc/wsn/relay.crt:ro
       - ./state/relay.key:/etc/wsn/relay.key:ro
-    networks: [backend]
+    networks: [edge, backend]
     mem_limit: 128m
     logging: *logging
 
 networks:
+  # Caddy publishes 443 from a routable network. Publishing a port from an
+  # internal-only network relies on the daemon's userland proxy and silently
+  # drops inbound traffic when `userland-proxy` is false.
+  edge: {}
+  # The relay joins only this network, so it still cannot reach the internet.
   backend:
     internal: true

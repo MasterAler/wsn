@@ -73,6 +73,9 @@ if ($ExistingAdapter) {
     Get-NetRoute -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
     & (Join-Path $Bundle 'tapctl.exe') delete $ExistingAdapter.InterfaceGuid | Out-Null
 }
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.Comment -eq 'WSN' } |
+    ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }
 
 Assert-NoRouteConflict $Meta.overlay
 foreach ($Route in $Meta.routes) { Assert-NoRouteConflict $Route }
@@ -100,6 +103,8 @@ Copy-Item (Join-Path $Bundle 'bundle.json') $ConfigDir -Force
 if ($LASTEXITCODE -ne 0) { throw "tapctl failed to create adapter $($Meta.device)" }
 $Adapter = Get-NetAdapter -Name $Meta.device
 Set-NetAdapter -Name $Meta.device -MacAddress ($Meta.mac -replace ':','') -Confirm:$false
+# The overlay carries IPv4 only.
+Disable-NetAdapterBinding -Name $Meta.device -ComponentID 'ms_tcpip6' -ErrorAction SilentlyContinue
 Enable-NetAdapter -Name $Meta.device -Confirm:$false
 
 $AddressParts = $Meta.address.Split('/')
@@ -109,9 +114,20 @@ foreach ($Route in $Meta.routes) {
     New-NetRoute -DestinationPrefix $Route -InterfaceAlias $Meta.device -NextHop $Meta.gateway -RouteMetric 5 -PolicyStore PersistentStore | Out-Null
 }
 
+# Split DNS. An NRPT rule sends only the listed namespaces to the corporate
+# resolver; every other lookup keeps using the resolvers this machine already
+# had, so home and cafe networks continue to work normally.
+if ($Meta.dns -and $Meta.search) {
+    foreach ($Domain in $Meta.search) {
+        Add-DnsClientNrptRule -Namespace ".$Domain" -NameServers $Meta.dns -Comment 'WSN' | Out-Null
+    }
+}
+
 $BinaryPath = '"{0}" -config "{1}"' -f (Join-Path $InstallDir 'wsn-client.exe'), (Join-Path $ConfigDir 'client.json')
 New-Service -Name $ServiceName -BinaryPathName $BinaryPath -DisplayName 'WSN v2 Client' -StartupType Automatic | Out-Null
 & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
 Start-Service -Name $ServiceName
 
+Write-Host "Relay CA public-key fingerprint: $($Meta.ca_sha256)"
+Write-Host 'Confirm it matches the value your administrator published.'
 Write-Host 'WSN installation complete'

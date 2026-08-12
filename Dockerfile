@@ -1,12 +1,16 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.22.2-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+# Populated automatically by buildx; the defaults keep a plain `docker build`
+# producing the same linux/amd64 image it always did.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags='-s -w' -o /out/wsn-server ./cmd/wsn-server
 
 FROM scratch
