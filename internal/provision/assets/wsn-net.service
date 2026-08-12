@@ -1,0 +1,14 @@
+[Unit]
+Description=WSN TAP interface and routes
+After=network-online.target
+Wants=network-online.target
+Before=wsn-client.service wsn-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/wsn-net up
+ExecStop=/usr/local/libexec/wsn-net down
+
+[Install]
+WantedBy=multi-user.target

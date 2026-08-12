@@ -1,0 +1,22 @@
+{
+	auto_https off
+	admin off
+}
+
+https://{$WSN_PUBLIC_IP} {
+	tls /etc/wsn/relay.crt /etc/wsn/relay.key {
+		protocols tls1.3
+	}
+
+	# Both branches must be handle blocks. Caddy sorts directives by its own
+	# order rather than by the order written here, and a bare `respond 404`
+	# sorts ahead of `reverse_proxy` with a matcher that accepts everything,
+	# so it would answer /wsn as well and the relay would never see a client.
+	handle /wsn {
+		reverse_proxy relay:8080
+	}
+
+	handle {
+		respond 404
+	}
+}
