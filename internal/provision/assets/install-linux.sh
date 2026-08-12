@@ -6,7 +6,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-bundle_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bundle_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 
 systemctl stop wsn-client.service 2>/dev/null || true
 systemctl stop wsn-gateway.service 2>/dev/null || true

@@ -428,22 +428,24 @@ func renderBundle(directory string, state State, client ProvisionedClient, optio
 	if err := os.WriteFile(filepath.Join(directory, "client.key"), []byte(client.Key+"\n"), 0600); err != nil {
 		return err
 	}
+	// These paths name locations on the target host, so they must use the
+	// target's separator. filepath.Join uses the separator of whichever machine
+	// wsnctl runs on, so a Linux bundle built on Windows got \etc\wsn\... which
+	// LoadClient then rejects on the client as a relative path.
 	configPath := "/etc/wsn"
+	separator := "/"
 	binaryName := "wsn-client"
 	if client.OS == "windows" {
 		configPath = `C:\ProgramData\WSN`
+		separator = `\`
 		binaryName += ".exe"
 	}
 	clientConfig := config.Client{
 		Server: "wss://" + state.PublicIP + "/wsn",
-		CAFile: filepath.Join(configPath, "relay-ca.crt"),
-		ID:     client.ID, KeyFile: filepath.Join(configPath, "client.key"), Device: client.Device,
+		CAFile: configPath + separator + "relay-ca.crt",
+		ID:     client.ID, KeyFile: configPath + separator + "client.key", Device: client.Device,
 		MAC: client.MAC, Address: client.Address, Gateway: state.Gateway, Routes: client.Routes,
 		MaxFrameSize: config.DefaultMaxFrameSize,
-	}
-	if client.OS == "windows" {
-		clientConfig.CAFile = configPath + `\relay-ca.crt`
-		clientConfig.KeyFile = configPath + `\client.key`
 	}
 	if err := config.SaveJSON(filepath.Join(directory, "client.json"), clientConfig, 0600); err != nil {
 		return err
@@ -535,11 +537,23 @@ func renderBundle(directory string, state State, client ProvisionedClient, optio
 		if strings.HasSuffix(name, ".sh") || strings.HasSuffix(name, ".ps1") {
 			mode = 0755
 		}
+		if !strings.HasSuffix(name, ".ps1") {
+			contents = toUnixNewlines(contents)
+		}
 		if err := os.WriteFile(filepath.Join(directory, name), contents, mode); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// toUnixNewlines strips CR so scripts and unit files run on the target. go:embed
+// captures the working tree byte for byte, so a Windows checkout with
+// core.autocrlf=true embeds CRLF, and "#!/bin/sh\r" makes Linux report the
+// interpreter as missing. .gitattributes pins LF; this keeps a bundle correct
+// even when it is built from a tree that was checked out some other way.
+func toUnixNewlines(contents []byte) []byte {
+	return bytes.ReplaceAll(contents, []byte("\r\n"), []byte("\n"))
 }
 
 func generateCertificates(directory string, publicIP netip.Addr) error {

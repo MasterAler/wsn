@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,108 @@ var (
 	elfBinary = []byte("\x7fELF placeholder linux client")
 	peBinary  = []byte("MZ placeholder windows client")
 )
+
+// A Linux bundle must carry POSIX paths no matter which OS wsnctl runs on. When
+// these were built with filepath.Join, a bundle produced on a Windows
+// administrator machine shipped "\etc\wsn\relay-ca.crt" and every Linux client
+// refused to start with "ca_file and key_file must be absolute paths".
+func TestLinuxBundleUsesPOSIXConfigPaths(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := Init(InitOptions{Directory: directory, PublicIP: "203.0.113.10", Overlay: "100.96.42.0/24", Gateway: "100.96.42.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddClient(AddOptions{Directory: directory, ID: "bob", OS: "linux", Address: "100.96.42.3", Routes: []string{"10.5.0.0/16"}}); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "wsn-client")
+	if err := os.WriteFile(binary, elfBinary, 0755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "bob.tar.gz")
+	if _, err := Bundle(BundleOptions{Directory: directory, ID: "bob", ClientBinary: binary, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	clientJSON := readTarEntry(t, output, "client.json")
+	if strings.Contains(clientJSON, `\\`) {
+		t.Errorf("Linux client.json contains Windows separators:\n%s", clientJSON)
+	}
+	for _, want := range []string{`"ca_file": "/etc/wsn/relay-ca.crt"`, `"key_file": "/etc/wsn/client.key"`} {
+		if !strings.Contains(clientJSON, want) {
+			t.Errorf("Linux client.json missing %s:\n%s", want, clientJSON)
+		}
+	}
+}
+
+func readTarEntry(t *testing.T, archivePath, name string) string {
+	t.Helper()
+	file, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if err != nil {
+			t.Fatalf("%s not found in %s", name, archivePath)
+		}
+		if header.Name == name {
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+	}
+}
+
+// Bundled scripts and units must be LF whatever the build host did to the
+// working tree: "#!/bin/sh\r" fails on Linux with "required file not found", so
+// a CRLF install-linux.sh cannot even start.
+func TestLinuxBundleShipsUnixNewlines(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := Init(InitOptions{Directory: directory, PublicIP: "203.0.113.10", Overlay: "100.96.42.0/24", Gateway: "100.96.42.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddClient(AddOptions{
+		Directory: directory, ID: "gw", OS: "linux", Role: "gateway", Address: "100.96.42.1",
+		Egress: "eth0", Routes: []string{"10.5.0.0/16"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "wsn-client")
+	if err := os.WriteFile(binary, elfBinary, 0755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "gw.tar.gz")
+	if _, err := Bundle(BundleOptions{Directory: directory, ID: "gw", ClientBinary: binary, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"install-linux.sh", "uninstall-linux.sh", "upgrade-linux.sh", "rollback-linux.sh",
+		"wsn-net.sh", "wsn-gateway.sh",
+		"wsn-client.service", "wsn-net.service", "wsn-gateway.service",
+	} {
+		contents := readTarEntry(t, output, name)
+		if strings.Contains(contents, "\r") {
+			t.Errorf("%s contains CR; it would not execute on Linux", name)
+		}
+	}
+	if shebang := readTarEntry(t, output, "install-linux.sh"); !strings.HasPrefix(shebang, "#!/bin/sh\n") {
+		t.Errorf("install-linux.sh has a broken shebang line: %q", firstLine(shebang))
+	}
+}
+
+func firstLine(value string) string {
+	if index := strings.IndexByte(value, '\n'); index >= 0 {
+		return value[:index+1]
+	}
+	return value
+}
 
 func TestProvisionDeploymentAndLinuxBundle(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "state")
@@ -130,7 +234,9 @@ func TestWindowsAndServerBundlesArePrivate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0600 {
+		// NTFS does not carry Unix permission bits, so Windows always reports
+		// 0666 here. The mode still matters on the platforms that enforce it.
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 			t.Fatalf("private bundle %s has mode %o", path, info.Mode().Perm())
 		}
 	}

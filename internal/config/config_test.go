@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -38,7 +39,13 @@ func TestClientRejectsRouteOverlappingOverlay(t *testing.T) {
 	if _, err := LoadClient(path); err == nil {
 		t.Fatal("overlapping route accepted")
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("unexpected mode: %v %v", info, err)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// NTFS does not carry Unix permission bits, so Windows always reports 0666
+	// here. The mode still matters on the platforms that enforce it.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatalf("unexpected mode %o", info.Mode().Perm())
 	}
 }

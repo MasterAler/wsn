@@ -12,7 +12,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 source_state=${1:?usage: reload.sh /path/to/extracted/server-bundle}
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 
 test -f "$source_state/server.json" || { echo "missing $source_state/server.json" >&2; exit 1; }
 test -d "$script_dir/state" || { echo "run install.sh first" >&2; exit 1; }
