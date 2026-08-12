@@ -18,6 +18,7 @@ const (
 	AuthOK           = byte(0)
 	AuthFailed       = byte(1)
 	MaxClientIDSize  = 64
+	MaxHelloSize     = 3 + MaxClientIDSize
 )
 
 var authContext = []byte("WSN-AUTH-v2\x00")

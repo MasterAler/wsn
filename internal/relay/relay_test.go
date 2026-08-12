@@ -88,6 +88,33 @@ func TestSourceMACSpoofDisconnectsClient(t *testing.T) {
 	}
 }
 
+func TestOversizedHelloIsRejected(t *testing.T) {
+	cfg := config.Relay{
+		Path: "/wsn", HealthPath: "/healthz", MaxFrameSize: 2048, ClientQueueSize: 4,
+		HandshakeTimeoutMS: 1000, IdleTimeoutMS: 5000,
+	}
+	server, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	dialer := websocket.Dialer{Subprotocols: []string{protocol.Subprotocol}}
+	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/wsn", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, protocol.MaxHelloSize+1)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("oversized hello was not rejected")
+	}
+}
+
 func dialAuthenticated(t *testing.T, url, id string, key []byte, mac net.HardwareAddr) *websocket.Conn {
 	t.Helper()
 	dialer := websocket.Dialer{Subprotocols: []string{protocol.Subprotocol}}

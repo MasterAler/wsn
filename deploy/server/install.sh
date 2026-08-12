@@ -23,5 +23,5 @@ chown 65532:65532 "$script_dir/state/server.json"
 cd "$script_dir"
 docker compose config --quiet
 docker compose pull
-docker compose up -d --remove-orphans
+docker compose up -d --remove-orphans --force-recreate
 docker compose ps

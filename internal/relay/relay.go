@@ -147,6 +147,7 @@ func (s *Server) authenticate(conn *websocket.Conn) (authorizedClient, error) {
 	deadline := time.Now().Add(s.handshake)
 	_ = conn.SetReadDeadline(deadline)
 	_ = conn.SetWriteDeadline(deadline)
+	conn.SetReadLimit(protocol.MaxHelloSize)
 	messageType, hello, err := conn.ReadMessage()
 	if err != nil || messageType != websocket.BinaryMessage {
 		return authorizedClient{}, errors.New("invalid hello")
@@ -174,6 +175,7 @@ func (s *Server) authenticate(conn *websocket.Conn) (authorizedClient, error) {
 	if err := conn.WriteMessage(websocket.BinaryMessage, []byte{protocol.AuthOK}); err != nil {
 		return authorizedClient{}, errors.New("write authentication result")
 	}
+	conn.SetReadLimit(int64(s.cfg.MaxFrameSize))
 	_ = conn.SetWriteDeadline(time.Time{})
 	_ = conn.SetReadDeadline(time.Now().Add(s.idle))
 	return client, nil
