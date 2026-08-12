@@ -56,6 +56,16 @@ func Gateway(cfg config.Client, egress string) error {
 }
 
 func gatewayWithRoutes(cfg config.Client, egress string, routes []systemRoute) error {
+	overlay, _ := netip.ParsePrefix(cfg.Address)
+	overlay = overlay.Masked()
+	for _, existing := range routes {
+		if existing.prefix.Bits() == 0 || existing.interfaceName == cfg.Device {
+			continue
+		}
+		if overlap(overlay, existing.prefix) {
+			return fmt.Errorf("configured network %s overlaps existing route %s on %s", overlay, existing.prefix, existing.interfaceName)
+		}
+	}
 	for _, value := range cfg.Routes {
 		target, _ := netip.ParsePrefix(value)
 		for _, existing := range routes {

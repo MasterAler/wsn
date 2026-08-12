@@ -35,6 +35,16 @@ func TestClientRejectsOverlayOverlappingHomeLAN(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsOverlayOverlappingExistingRoute(t *testing.T) {
+	cfg := config.Client{
+		Device: "wsn0", Address: "192.168.1.1/24", Routes: []string{"10.5.0.0/16"},
+	}
+	routes := []systemRoute{{prefix: netip.MustParsePrefix("192.168.1.0/24"), interfaceName: "eth0"}}
+	if err := gatewayWithRoutes(cfg, "eth0", routes); err == nil {
+		t.Fatal("gateway accepted overlay overlapping its existing LAN route")
+	}
+}
+
 func TestNetMaskBits(t *testing.T) {
 	if got := netMaskBits([4]byte{255, 255, 0, 0}); got != 16 {
 		t.Fatalf("got %d", got)

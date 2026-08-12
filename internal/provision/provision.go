@@ -885,6 +885,11 @@ func tarDirectory(directory, output string) error {
 		}
 		header, _ := tar.FileInfoHeader(info, "")
 		header.Name = entry.Name()
+		// The bundle targets Linux even when wsnctl is running on Windows, where
+		// staged files do not retain POSIX execute or owner-only permission bits.
+		// Set target permissions from the bundle contract rather than copying
+		// host filesystem metadata into the archive.
+		header.Mode = linuxArchiveMode(entry.Name())
 		if err := archive.WriteHeader(header); err != nil {
 			return err
 		}
@@ -903,6 +908,18 @@ func tarDirectory(directory, output string) error {
 		return err
 	}
 	return file.Close()
+}
+
+func linuxArchiveMode(name string) int64 {
+	if name == "wsn-client" || strings.HasSuffix(name, ".sh") {
+		return 0755
+	}
+	switch name {
+	case "client.json", "client.key", "server.json", "relay.key":
+		return 0600
+	default:
+		return 0644
+	}
 }
 
 func prefixesOverlap(a, b netip.Prefix) bool { return a.Contains(b.Addr()) || b.Contains(a.Addr()) }

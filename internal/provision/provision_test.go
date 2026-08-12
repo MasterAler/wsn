@@ -78,6 +78,49 @@ func readTarEntry(t *testing.T, archivePath, name string) string {
 	}
 }
 
+func TestTarDirectorySetsLinuxModesIndependentOfHost(t *testing.T) {
+	directory := t.TempDir()
+	for _, name := range []string{"wsn-client", "install-linux.sh", "client.json", "client.key", "relay-ca.crt"} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(name), 0666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	if err := tarDirectory(directory, output); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{
+		"wsn-client": 0755, "install-linux.sh": 0755,
+		"client.json": 0600, "client.key": 0600, "relay-ca.crt": 0644,
+	}
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Mode != want[header.Name] {
+			t.Errorf("%s mode = %#o, want %#o", header.Name, header.Mode, want[header.Name])
+		}
+		delete(want, header.Name)
+	}
+	for name := range want {
+		t.Errorf("archive missing %s", name)
+	}
+}
+
 // Bundled scripts and units must be LF whatever the build host did to the
 // working tree: "#!/bin/sh\r" fails on Linux with "required file not found", so
 // a CRLF install-linux.sh cannot even start.
