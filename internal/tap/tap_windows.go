@@ -58,6 +58,14 @@ func open(name string) (Device, error) {
 	return &windowsDevice{file: file, name: name}, nil
 }
 
+// isTapComponent recognizes both spellings of the TAP-Windows component. An
+// adapter created by tapctl is root-enumerated and registers as "root\tap0901",
+// while the driver's own installer registers a plain "tap0901". Bundles always
+// create theirs with tapctl, so matching only the latter finds no adapter at all.
+func isTapComponent(componentID string) bool {
+	return strings.TrimPrefix(strings.ToLower(componentID), `root\`) == tapComponentID
+}
+
 func findAdapter(wanted string) (string, error) {
 	class, err := registry.OpenKey(registry.LOCAL_MACHINE, networkClassKey, registry.ENUMERATE_SUB_KEYS|registry.QUERY_VALUE)
 	if err != nil {
@@ -76,7 +84,7 @@ func findAdapter(wanted string) (string, error) {
 		componentID, _, _ := subkey.GetStringValue("ComponentId")
 		guid, _, _ := subkey.GetStringValue("NetCfgInstanceId")
 		subkey.Close()
-		if !strings.EqualFold(componentID, tapComponentID) || guid == "" {
+		if !isTapComponent(componentID) || guid == "" {
 			continue
 		}
 		connection, err := registry.OpenKey(registry.LOCAL_MACHINE, networkKey+`\`+guid+`\Connection`, registry.QUERY_VALUE)

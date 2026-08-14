@@ -26,13 +26,26 @@ function Convert-IPv4([string]$Address) {
     return [BitConverter]::ToUInt32($Bytes, 0)
 }
 
+# route.exe takes a dotted mask rather than a prefix length.
+function Convert-PrefixToMask([int]$Prefix) {
+    $All = [uint64]0xffffffffL
+    $Mask = if ($Prefix -eq 0) { [uint64]0 } else { ($All -shl (32 - $Prefix)) -band $All }
+    $Bytes = [BitConverter]::GetBytes([uint32]$Mask)
+    [Array]::Reverse($Bytes)
+    return ($Bytes -join '.')
+}
+
 function Get-CidrRange([string]$Cidr) {
+    # Windows PowerShell 5.1 parses 0xffffffff as Int32 -1, so casting it to
+    # [uint64] throws before a single route is compared. The L suffix forces a
+    # 64-bit literal; every value derived from it stays in range.
+    $All = [uint64]0xffffffffL
     $Parts = $Cidr.Split('/')
     $Prefix = [int]$Parts[1]
     $Address = [uint64](Convert-IPv4 $Parts[0])
-    $Mask = if ($Prefix -eq 0) { [uint64]0 } else { (([uint64]0xffffffff) -shl (32 - $Prefix)) -band [uint64]0xffffffff }
+    $Mask = if ($Prefix -eq 0) { [uint64]0 } else { ($All -shl (32 - $Prefix)) -band $All }
     $Start = $Address -band $Mask
-    $End = $Start + ([uint64]0xffffffff - $Mask)
+    $End = $Start + ($All - $Mask)
     return @($Start, $End)
 }
 
@@ -71,6 +84,18 @@ if ($Existing) {
 $ExistingAdapter = Get-NetAdapter -Name $Meta.device -ErrorAction SilentlyContinue
 if ($ExistingAdapter) {
     Get-NetRoute -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+    # Routes are written with route.exe -p and live outside the active table, so
+    # the line above does not reach them. Tear down what the installed bundle
+    # declared as well as what this one does: a reinstall whose route list lost a
+    # destination would otherwise strand it in the persistent store, and the
+    # bundle.json describing it is about to be overwritten, so no later uninstall
+    # would know to remove it either.
+    $Stale = @($Meta.routes)
+    $InstalledMeta = Join-Path $ConfigDir 'bundle.json'
+    if (Test-Path $InstalledMeta) {
+        $Stale += @((Get-Content -Raw $InstalledMeta | ConvertFrom-Json).routes)
+    }
+    foreach ($Route in ($Stale | Sort-Object -Unique)) { & route.exe delete $Route.Split('/')[0] | Out-Null }
     & (Join-Path $Bundle 'tapctl.exe') delete $ExistingAdapter.InterfaceGuid | Out-Null
 }
 Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
@@ -103,15 +128,48 @@ Copy-Item (Join-Path $Bundle 'bundle.json') $ConfigDir -Force
 if ($LASTEXITCODE -ne 0) { throw "tapctl failed to create adapter $($Meta.device)" }
 $Adapter = Get-NetAdapter -Name $Meta.device
 Set-NetAdapter -Name $Meta.device -MacAddress ($Meta.mac -replace ':','') -Confirm:$false
+# The TAP driver reports the adapter as disconnected until an application opens
+# the device, which for WSN is the client service that does not exist yet.
+# Windows silently ignores a DHCP change on a disconnected interface, so the
+# static address below would fail with "Inconsistent parameters PolicyStore
+# PersistentStore and Dhcp Enabled" while Set-NetIPInterface reported success.
+Set-NetAdapterAdvancedProperty -Name $Meta.device -DisplayName 'Media Status' -DisplayValue 'Always Connected' -ErrorAction Stop
 # The overlay carries IPv4 only.
 Disable-NetAdapterBinding -Name $Meta.device -ComponentID 'ms_tcpip6' -ErrorAction SilentlyContinue
 Enable-NetAdapter -Name $Meta.device -Confirm:$false
 
+# Changing adapter properties bounces the interface; wait for IPv4 to return
+# before configuring it.
+for ($Attempt = 0; $Attempt -lt 50; $Attempt++) {
+    $Interface = Get-NetIPInterface -InterfaceAlias $Meta.device -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    if ($Interface -and $Interface.ConnectionState -eq 'Connected') { break }
+    Start-Sleep -Milliseconds 200
+}
+
 $AddressParts = $Meta.address.Split('/')
-New-NetIPAddress -InterfaceAlias $Meta.device -IPAddress $AddressParts[0] -PrefixLength ([int]$AddressParts[1]) | Out-Null
-Set-NetIPInterface -InterfaceAlias $Meta.device -AddressFamily IPv4 -InterfaceMetric 5 -Dhcp Disabled
+# DHCP has to be disabled before the address is assigned. New-NetIPAddress
+# writes to the persistent store by default, and Windows refuses a persistent
+# static address on an interface still marked DHCP; the persistent routes then
+# fail in turn, having no persistent addressing to attach to.
+#
+# These are CDXML cmdlets, whose errors stay non-terminating even under
+# $ErrorActionPreference = 'Stop', so -ErrorAction Stop is given explicitly.
+# Without it the installer reports success over a half-configured adapter.
+Set-NetIPInterface -InterfaceAlias $Meta.device -AddressFamily IPv4 -InterfaceMetric 5 -Dhcp Disabled -ErrorAction Stop
+New-NetIPAddress -InterfaceAlias $Meta.device -IPAddress $AddressParts[0] -PrefixLength ([int]$AddressParts[1]) -ErrorAction Stop | Out-Null
+# New-NetRoute cannot write these to the persistent store: every combination of
+# InterfaceAlias, InterfaceIndex, NextHop and RouteMetric returns Windows error
+# 87. route.exe writes the legacy persistent route instead, which Get-NetRoute
+# then reports normally. Its exit code is not dependable, so each route is read
+# back rather than assumed.
+$InterfaceIndex = (Get-NetAdapter -Name $Meta.device).ifIndex
 foreach ($Route in $Meta.routes) {
-    New-NetRoute -DestinationPrefix $Route -InterfaceAlias $Meta.device -NextHop $Meta.gateway -RouteMetric 5 -PolicyStore PersistentStore | Out-Null
+    $RouteParts = $Route.Split('/')
+    $Mask = Convert-PrefixToMask ([int]$RouteParts[1])
+    & route.exe -p add $RouteParts[0] mask $Mask $Meta.gateway metric 5 if $InterfaceIndex | Out-Null
+    if (-not (Get-NetRoute -DestinationPrefix $Route -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue)) {
+        throw "failed to add persistent route $Route via $($Meta.gateway) on $($Meta.device)"
+    }
 }
 
 # Split DNS. An NRPT rule sends only the listed namespaces to the corporate

@@ -19,6 +19,9 @@ Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
 
 if ($Meta) {
     Get-NetRoute -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+    # The installer writes routes with route.exe -p, which stores them outside
+    # the active table; Remove-NetRoute above does not reach those.
+    foreach ($Route in $Meta.routes) { & route.exe delete $Route.Split('/')[0] | Out-Null }
     $Adapter = Get-NetAdapter -Name $Meta.device -ErrorAction SilentlyContinue
     if ($Adapter -and (Test-Path (Join-Path $InstallDir 'tapctl.exe'))) {
         & (Join-Path $InstallDir 'tapctl.exe') delete $Adapter.InterfaceGuid | Out-Null

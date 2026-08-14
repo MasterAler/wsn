@@ -517,7 +517,7 @@ func renderBundle(directory string, state State, client ProvisionedClient, optio
 	}
 	assetNames := []string{"install-linux.sh", "uninstall-linux.sh", "upgrade-linux.sh", "rollback-linux.sh", "wsn-net.sh", "wsn-client.service", "wsn-net.service"}
 	if client.OS == "windows" {
-		assetNames = []string{"install-windows.ps1", "uninstall-windows.ps1", "upgrade-windows.ps1", "rollback-windows.ps1"}
+		assetNames = []string{"install-windows.ps1", "uninstall-windows.ps1", "upgrade-windows.ps1", "rollback-windows.ps1", "wsn-toggle.ps1"}
 		if err := copyFile(options.TapInstaller, filepath.Join(directory, "tap-driver.exe"), 0644); err != nil {
 			return err
 		}
