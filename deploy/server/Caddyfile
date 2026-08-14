@@ -1,6 +1,13 @@
 {
 	auto_https off
 	admin off
+
+	# Clients reach the relay at a bare IP, and RFC 6066 forbids an IP literal
+	# in SNI, so neither Go's crypto/tls nor curl sends a server name at all.
+	# Caddy selects certificates by name and has none to match, so without a
+	# default the handshake dies with an internal_error alert before the
+	# certificate is ever offered.
+	default_sni {$WSN_PUBLIC_IP}
 }
 
 https://{$WSN_PUBLIC_IP} {
