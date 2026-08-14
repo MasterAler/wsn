@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -18,9 +19,15 @@ func main() {
 	checkNetwork := flags.String("check-network", "", "validate routes as client or gateway, then exit")
 	egress := flags.String("egress", "", "gateway egress interface for route validation")
 	_ = flags.Parse(os.Args[1:])
-	cfg, err := config.LoadClient(*configPath)
+	logOutput, err := daemon.LogOutput("client.log")
 	if err != nil {
 		fatal(err)
+	}
+	defer logOutput.Close()
+	logger := slog.New(slog.NewJSONHandler(logOutput, nil))
+	cfg, err := config.LoadClient(*configPath)
+	if err != nil {
+		fatalTo(logOutput, err)
 	}
 	if *checkNetwork != "" {
 		switch *checkNetwork {
@@ -37,13 +44,12 @@ func main() {
 		fmt.Println("network configuration is safe to install")
 		return
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	runner, err := clientcore.New(cfg, logger)
 	if err != nil {
-		fatal(err)
+		fatalTo(logOutput, err)
 	}
 	if err := daemon.Run("WSNClient", runner.Run); err != nil {
-		fatal(err)
+		fatalTo(logOutput, err)
 	}
 }
 
@@ -55,5 +61,13 @@ func fatalIf(err error) {
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "wsn-client:", err)
+	os.Exit(1)
+}
+
+func fatalTo(output io.Writer, err error) {
+	fmt.Fprintln(output, "wsn-client:", err)
+	if output != os.Stderr {
+		fmt.Fprintln(os.Stderr, "wsn-client:", err)
+	}
 	os.Exit(1)
 }
