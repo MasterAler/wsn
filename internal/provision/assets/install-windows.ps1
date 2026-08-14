@@ -84,9 +84,18 @@ if ($Existing) {
 $ExistingAdapter = Get-NetAdapter -Name $Meta.device -ErrorAction SilentlyContinue
 if ($ExistingAdapter) {
     Get-NetRoute -InterfaceAlias $Meta.device -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-    # Routes are written with route.exe -p and live outside the active table,
-    # so the line above does not reach them.
-    foreach ($Route in $Meta.routes) { & route.exe delete $Route.Split('/')[0] | Out-Null }
+    # Routes are written with route.exe -p and live outside the active table, so
+    # the line above does not reach them. Tear down what the installed bundle
+    # declared as well as what this one does: a reinstall whose route list lost a
+    # destination would otherwise strand it in the persistent store, and the
+    # bundle.json describing it is about to be overwritten, so no later uninstall
+    # would know to remove it either.
+    $Stale = @($Meta.routes)
+    $InstalledMeta = Join-Path $ConfigDir 'bundle.json'
+    if (Test-Path $InstalledMeta) {
+        $Stale += @((Get-Content -Raw $InstalledMeta | ConvertFrom-Json).routes)
+    }
+    foreach ($Route in ($Stale | Sort-Object -Unique)) { & route.exe delete $Route.Split('/')[0] | Out-Null }
     & (Join-Path $Bundle 'tapctl.exe') delete $ExistingAdapter.InterfaceGuid | Out-Null
 }
 Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
