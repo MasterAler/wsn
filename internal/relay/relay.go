@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MasterAler/wsn/internal/config"
@@ -185,7 +186,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	peer.readLoop(s.cfg.MaxFrameSize, s.hub)
 	s.hub.remove(peer)
 	peer.stop()
-	s.log.Info("client disconnected", "id", peer.id, "mac", peer.mac.String(), "remote", remote)
+	s.log.Info("client disconnected", "id", peer.id, "mac", peer.mac.String(), "remote", remote,
+		"dropped", peer.dropped.Load())
 }
 
 func (s *Server) authenticate(conn *websocket.Conn) (authorizedClient, error) {
@@ -309,11 +311,18 @@ func (h *hub) forward(sender *peer, frame []byte) {
 		select {
 		case target.send <- copyOfFrame:
 		default:
-			h.log.Warn("disconnecting slow client", "id", target.id, "mac", target.mac.String())
-			target.stop()
+			// The overlay is Ethernet, which is permitted to lose a frame, and
+			// losing one is what makes the sender's TCP back off. Disconnecting
+			// the peer instead tore down every connection it held: a burst large
+			// enough to fill the queue is ordinary traffic, not a broken client.
+			target.noteDrop(h.log)
 		}
 	}
 }
+
+// dropReportInterval bounds how often a peer that cannot keep up is reported.
+// A saturated peer discards far too many frames to log a line for each.
+const dropReportInterval = 30 * time.Second
 
 type peer struct {
 	id       string
@@ -324,6 +333,26 @@ type peer struct {
 	stopOnce sync.Once
 	log      *slog.Logger
 	idle     time.Duration
+
+	dropped        atomic.Uint64
+	lastDropReport atomic.Int64
+}
+
+// noteDrop counts a discarded frame and reports the running total at most once
+// per dropReportInterval, so a peer that cannot keep up stays visible in the log
+// without drowning it.
+func (p *peer) noteDrop(log *slog.Logger) {
+	total := p.dropped.Add(1)
+	now := time.Now().UnixNano()
+	last := p.lastDropReport.Load()
+	if now-last < int64(dropReportInterval) {
+		return
+	}
+	if !p.lastDropReport.CompareAndSwap(last, now) {
+		return
+	}
+	log.Warn("dropping frames for a client that cannot keep up",
+		"id", p.id, "mac", p.mac.String(), "dropped", total)
 }
 
 func (p *peer) stop() {
