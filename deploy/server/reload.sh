@@ -15,10 +15,16 @@ source_state=${1:?usage: reload.sh /path/to/extracted/server-bundle}
 script_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 
 test -f "$source_state/server.json" || { echo "missing $source_state/server.json" >&2; exit 1; }
-test -d "$script_dir/state" || { echo "run install.sh first" >&2; exit 1; }
+test -f "$script_dir/state/server.json" || { echo "run install.sh first" >&2; exit 1; }
 
-install -m 0600 "$source_state/server.json" "$script_dir/state/server.json"
-chown 65532:65532 "$script_dir/state/server.json"
+# compose.yaml bind-mounts state/server.json into the relay as a single file,
+# which Docker resolves to an inode when the container starts. install(1)
+# unlinks its destination before writing, so it would leave the container
+# mounted on the file that existed at startup: the relay handles the SIGHUP,
+# re-reads the path it can still see, and logs a successful reload while
+# continuing to run the previous client list. Rewrite in place so the inode
+# survives; mode and ownership were set by install.sh and survive with it.
+cat "$source_state/server.json" >"$script_dir/state/server.json"
 
 cd "$script_dir"
 docker compose kill -s SIGHUP relay
