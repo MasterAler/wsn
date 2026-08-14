@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	clientcore "github.com/MasterAler/wsn/internal/client"
 	"github.com/MasterAler/wsn/internal/config"
@@ -37,7 +38,7 @@ func main() {
 		fmt.Println("network configuration is safe to install")
 		return
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(daemon.LogWriter(filepath.Dir(*configPath)), nil))
 	runner, err := clientcore.New(cfg, logger)
 	if err != nil {
 		fatal(err)

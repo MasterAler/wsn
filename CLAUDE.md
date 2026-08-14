@@ -61,9 +61,10 @@ cannot reach the corporate network and must not learn how.
 than rewriting it in place leaves the container reading the old inode, and the
 relay will log a *successful* reload while running the previous client list.
 
-**Client logs go to stdout.** systemd captures them; the Windows SCM discards
-them entirely, so a Windows client's reconnects and errors are invisible unless
-it is run in the foreground.
+**Client logs depend on how the client was started.** In the foreground they go
+to stdout, and under systemd into the journal. A Windows service has no console
+and the SCM discards stdout, so it writes `client.log` next to `client.json`
+instead, rotated once at 4 MB.
 
 ## Windows notes
 
