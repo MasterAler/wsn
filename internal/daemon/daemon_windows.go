@@ -20,23 +20,35 @@ import (
 // long as it runs, so the file needs a ceiling.
 const maxLogBytes = 4 << 20
 
-// LogWriter reports where this daemon's logs belong. Under the service control
+// LogOutput reports where this daemon's logs belong. Under the service control
 // manager the process has no console and everything written to stdout is
 // discarded, which leaves a service that misbehaves with no record of why. A
 // service therefore logs beside its configuration; a foreground run keeps
 // stdout, so an operator watching it sees the session directly.
-func LogWriter(dir string) io.Writer {
+// The boolean result identifies a dedicated service log, allowing startup
+// diagnostics to be copied there without contaminating interactive stdout.
+func LogOutput(dir string) (io.WriteCloser, bool, error) {
 	isService, err := svc.IsWindowsService()
-	if err != nil || !isService {
-		return os.Stdout
+	if err != nil {
+		return nil, false, fmt.Errorf("detect Windows service for logging: %w", err)
+	}
+	if !isService {
+		return nopWriteCloser{os.Stdout}, false, nil
 	}
 	file, err := openRotatingFile(filepath.Join(dir, "client.log"), maxLogBytes)
 	if err != nil {
-		// Being unable to record the logs is not a reason to refuse to run.
-		return os.Stdout
+		// Logging is best-effort: an unwritable, full, or temporarily locked
+		// log must not prevent the service (and therefore the tunnel) from
+		// starting. stdout is normally discarded by the service manager, but
+		// remains a valid fallback writer for the logger.
+		return nopWriteCloser{os.Stdout}, false, nil
 	}
-	return file
+	return file, true, nil
 }
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 // rotatingFile keeps one previous generation and starts a new one once the
 // current generation reaches its limit.
@@ -64,9 +76,15 @@ func openRotatingFile(path string, limit int64) (*rotatingFile, error) {
 func (f *rotatingFile) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.size+int64(len(p)) > f.limit {
-		if err := f.rotate(); err != nil {
-			return 0, err
+	if f.file == nil {
+		return 0, os.ErrClosed
+	}
+	if f.size > 0 && f.size+int64(len(p)) > f.limit {
+		// Rotation is best-effort. A viewer can temporarily prevent Windows
+		// from renaming a generation; rotate still restores an active handle.
+		rotateErr := f.rotate()
+		if f.file == nil {
+			return 0, rotateErr
 		}
 	}
 	n, err := f.file.Write(p)
@@ -76,20 +94,44 @@ func (f *rotatingFile) Write(p []byte) (int, error) {
 
 // rotate replaces the previous generation with the current one. Windows will
 // not rename a file that is still open, so the handle is closed first.
-func (f *rotatingFile) rotate() error {
-	if err := f.file.Close(); err != nil {
+func (f *rotatingFile) rotate() (err error) {
+	active := f.file
+	f.file = nil
+	// Whatever fails below, restore a writable active generation.
+	defer func() {
+		file, reopenErr := os.OpenFile(f.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if reopenErr != nil {
+			if err == nil {
+				err = reopenErr
+			}
+			return
+		}
+		f.file = file
+		if info, statErr := file.Stat(); statErr == nil {
+			f.size = info.Size()
+		} else if err == nil {
+			err = statErr
+		}
+	}()
+	if err := active.Close(); err != nil {
 		return err
 	}
+	_ = os.Remove(f.path + ".1")
 	if err := os.Rename(f.path, f.path+".1"); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(f.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return err
-	}
-	f.file = file
-	f.size = 0
 	return nil
+}
+
+func (f *rotatingFile) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.file == nil {
+		return nil
+	}
+	err := f.file.Close()
+	f.file = nil
+	return err
 }
 
 func Run(name string, run func(context.Context) error) error {

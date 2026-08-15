@@ -16,6 +16,12 @@ func Run(_ string, run func(context.Context) error) error {
 	return run(ctx)
 }
 
-// LogWriter reports where this daemon's logs belong. systemd captures stdout
-// into the journal, so there is nothing to arrange.
-func LogWriter(_ string) io.Writer { return os.Stdout }
+// LogOutput reports where this daemon's logs belong. The false result marks
+// stdout as an interactive stream rather than a dedicated service log.
+func LogOutput(_ string) (io.WriteCloser, bool, error) {
+	return nopWriteCloser{os.Stdout}, false, nil
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
