@@ -37,7 +37,11 @@ func LogOutput(dir string) (io.WriteCloser, bool, error) {
 	}
 	file, err := openRotatingFile(filepath.Join(dir, "client.log"), maxLogBytes)
 	if err != nil {
-		return nil, false, fmt.Errorf("open service log: %w", err)
+		// Logging is best-effort: an unwritable, full, or temporarily locked
+		// log must not prevent the service (and therefore the tunnel) from
+		// starting. stdout is normally discarded by the service manager, but
+		// remains a valid fallback writer for the logger.
+		return nopWriteCloser{os.Stdout}, false, nil
 	}
 	return file, true, nil
 }
