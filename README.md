@@ -27,7 +27,7 @@ The transport is Ethernet inside TLS inside TCP. On a lossy link the inner and o
 - TLS 1.3 uses a deployment-specific private CA. Clients load that CA only inside WSN; installers do not add it to an operating-system trust store.
 - Authentication uses a fresh random challenge and per-client HMAC-SHA256 key. A key can be revoked without rotating every client.
 - The relay binds each identity to a configured virtual MAC and rejects source-MAC spoofing.
-- Client and relay queues are bounded; oversized frames and slow peers are disconnected.
+- Client and relay queues are bounded. Oversized frames are rejected, while a full relay queue drops the newly arriving frame without disconnecting the destination peer.
 - The root CA key and provisioning state stay on the administrator's machine and must be backed up encrypted. Only a leaf TLS key and the relay's client-key database go to the VDS.
 - A generated client bundle contains that client's key. Transfer it privately, install it once, and delete the transfer copy.
 
@@ -337,6 +337,6 @@ WSN v2 is a full rewrite. It keeps the original idea — a private Ethernet segm
 
 The original WSN (2024, `assenovich`) was a 237-line Go relay with Qt/C++ clients and hand-maintained `systemd-networkd` units. It authenticated every peer with one shared secret against `sha256(challenge‖secret‖challenge)`, drew that challenge from `math/rand`, and let each client declare whatever MAC it liked.
 
-v2 replaces all of it. Each peer has its own 32-byte key and proves possession with HMAC-SHA256 over a `crypto/rand` challenge bound to both its identity and its virtual MAC, so a key can be revoked on its own and a peer cannot spoof another's source address. The relay gives each peer its own bounded queue, read limit, and idle and write deadlines, and disconnects one that falls behind; the original set no deadline or limit anywhere and wrote to every peer synchronously from a single router goroutine, so one stalled client held up the whole segment. Everything around it is new: `wsnctl` provisioning with a deployment-specific CA, reproducible client bundles, signed-driver Windows and systemd Linux installers, a workplace gateway confined to named corporate CIDRs, split DNS, and a containerized relay behind Caddy.
+v2 replaces all of it. Each peer has its own 32-byte key and proves possession with HMAC-SHA256 over a `crypto/rand` challenge bound to both its identity and its virtual MAC, so a key can be revoked on its own and a peer cannot spoof another's source address. The relay gives each peer its own bounded queue, read limit, and idle and write deadlines, and drops newly arriving frames when that queue is full without disconnecting the peer; the original set no deadline or limit anywhere and wrote to every peer synchronously from a single router goroutine, so one stalled client held up the whole segment. Everything around it is new: `wsnctl` provisioning with a deployment-specific CA, reproducible client bundles, signed-driver Windows and systemd Linux installers, a workplace gateway confined to named corporate CIDRs, split DNS, and a containerized relay behind Caddy.
 
 Both the earlier work and this one are covered by the MIT license reproduced in `LICENSE`.
