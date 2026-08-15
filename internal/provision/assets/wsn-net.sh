@@ -31,7 +31,12 @@ configure_dns() {
 }
 
 up() {
-  modprobe tun
+  # A kernel with TUN built in has no module to load, and an image carrying no
+  # module tree for its running kernel - WSL, most containers - cannot even
+  # look. Both fail here while /dev/net/tun works perfectly, so under `set -e`
+  # this would take the tunnel down over nothing. If TUN really is missing,
+  # `ip tuntap add` below says so far more clearly.
+  modprobe tun 2>/dev/null || true
   if ip link show "$WSN_DEVICE" >/dev/null 2>&1; then
     echo "interface $WSN_DEVICE already exists; refusing to replace it" >&2
     exit 1

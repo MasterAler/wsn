@@ -166,6 +166,35 @@ func TestOversizedHelloIsRejected(t *testing.T) {
 	}
 }
 
+func TestFullQueueDropsFrameAndKeepsTheSession(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := newHub(logger)
+	senderMAC, _ := net.ParseMAC("02:00:00:00:00:06")
+	targetMAC, _ := net.ParseMAC("02:00:00:00:00:07")
+	sender := &peer{id: "fast", mac: senderMAC, send: make(chan []byte, 1), done: make(chan struct{}), log: logger}
+	target := &peer{id: "slow", mac: targetMAC, send: make(chan []byte, 1), done: make(chan struct{}), log: logger}
+	h.add(sender)
+	h.add(target)
+
+	frame := make([]byte, 60)
+	copy(frame[0:6], targetMAC)
+	copy(frame[6:12], senderMAC)
+	h.forward(sender, frame) // fills the queue
+	h.forward(sender, frame) // has nowhere to go
+
+	select {
+	case <-target.done:
+		t.Fatal("a full queue disconnected the client")
+	default:
+	}
+	if dropped := target.dropped.Load(); dropped != 1 {
+		t.Fatalf("dropped = %d, want 1", dropped)
+	}
+	if queued := len(target.send); queued != 1 {
+		t.Fatalf("queued = %d, want 1", queued)
+	}
+}
+
 func dialAuthenticated(t *testing.T, url, id string, key []byte, mac net.HardwareAddr) *websocket.Conn {
 	t.Helper()
 	dialer := websocket.Dialer{Subprotocols: []string{protocol.Subprotocol}}
